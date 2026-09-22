@@ -46,7 +46,7 @@ BASELINE_SYSTEM = """你是计算助手。直接给出数值答案，只输出�
 
 _ACTION_RE = re.compile(r"Action:\s*(\w+)\[([^\]]*)\]")
 _FINAL_RE = re.compile(r"Final Answer:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)")
-_NUM_RE = re.compile(r"[-+]?\d+\.?\d+(?:[eE][-+]?\d+)?")
+_NUM_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 
 
 def parse_action(text):

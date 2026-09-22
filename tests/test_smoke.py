@@ -59,6 +59,13 @@ def test_parse():
     assert parse_number("答案是 16.67 m/s") == 16.67
 
 
+def test_parse_single_digit():
+    # 个位数也必须能解析（曾经有 bug 把 "9" 判成 parse_error）
+    assert parse_number("9") == 9.0
+    assert parse_number("5") == 5.0
+    assert parse_number("3.6e3") == 3600.0
+
+
 def test_baseline():
     llm = ScriptedLLM(["答案是 16.67"])
     r = BaselineSolver(llm).run("60 km/h 是多少 m/s")
