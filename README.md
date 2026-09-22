@@ -1,104 +1,102 @@
 # scicalc-agent
 
-一个用 **ReAct 智能体**求解科学计算题、并**系统评测它能力边界**的小项目。
+**工具能让大模型"算得对"吗？—— 一个 ReAct 智能体的消融实验**
 
-LLM 单独做数值计算经常"自信地算错"——它其实是语言模型，不是计算器。这个项目给它装上工具（计算器 + Python 代码执行），让它走 `Thought → Action → Observation` 的循环去算题，然后回答一个更重要的问题：**有了工具之后，它还在哪些地方出错？**
+大模型单独做数值计算经常"自信地算错"：它本质是语言模型，不是计算器。这个项目给大模型装上工具（计算器 + Python 代码执行），让它走 `Thought → Action → Observation` 循环去算题，然后用一个**消融实验**回答两个问题：
 
-## 有什么
+1. 加上工具，准确率到底提升多少？（裸 LLM vs 带工具 Agent）
+2. 答错之后让它"反思重试"（Reflexion），还能救回多少？
 
-- `agent.py` —— 手写的 ReAct 循环，不用框架，搞清楚每一步在干嘛
-- `tools.py` —— 两个工具：`calculator`（ast 白名单防注入）、`python`（子进程 + 超时）
-- `tasks.py` —— 10 道力学/物理计算题，带标准答案和容差
-- `eval.py` —— 评测 harness：成功率、平均步数、token 消耗、按题型和错误类型归因
-- `run_demo.py` —— 单题演示，打印完整推理轨迹
+## 三种求解方式（消融对照）
 
-## 为什么做这个
+| 方式 | 说明 |
+|------|------|
+| `baseline` | 裸 LLM，不给任何工具，直接要答案 |
+| `tools` | ReAct 智能体，能调用 calculator / python 两个工具 |
+| `reflexion` | 在 `tools` 基础上，答错了把失败原因喂回去，反思后重试（Shinn et al. 2023 的思路） |
 
-1. 它能直接回答「Agent 的能力边界在哪」——不是跑通一个 Hello World，而是用数据说清楚它在哪一类题上容易挂、挂在哪一步（规划错 / 工具用错 / 算错 / 超时）。
-2. 力学/科学计算是我的本行，选题和 CS 背景的千篇一律「聊天机器人 RAG」区分开。
-3. 手写 ReAct 循环而不是调 LangChain 的现成接口，是为了真正理解 Agent 的编排逻辑。
+三者跑在同一份评测集上，差异就纯粹来自"有没有工具、有没有反思"。
 
 ## 架构
 
 ```
-           ┌──────────────────────────────┐
-  问题 ──▶ │  LLM（DeepSeek / Qwen / …）   │
-           │  输出 Thought + Action        │
-           └──────────────┬───────────────┘
+            ┌────────────────────────────┐
+   问题 ──▶ │  LLM（DeepSeek / Qwen / …） │
+            │  输出 Thought + Action      │
+            └─────────────┬──────────────┘
                           │ Action
                           ▼
-           ┌──────────────────────────────┐
-           │  tools.py                     │
-           │  calculator / python          │
-           └──────────────┬───────────────┘
+            ┌────────────────────────────┐
+            │  tools.py                  │
+            │  calculator / python       │
+            └─────────────┬──────────────┘
                           │ Observation
                           ▼
-              （喂回 LLM，循环，直到 Final Answer）
+            （喂回 LLM 循环，直到 Final Answer）
+
+   reflexion：答错 → 把"你上一次答案是 X，错了"喂回去 → 重来一遍
 ```
 
 ## 快速开始
 
 ```bash
-# 1. 装依赖（就一个 requests）
 pip install -r requirements.txt
 
-# 2. 设 API key（默认 DeepSeek，最便宜；改 base_url 可换 Qwen/Kimi/OpenAI）
-export LLM_API_KEY=sk-你的key
+export LLM_API_KEY=sk-你的key          # 默认 DeepSeek，改 base_url 可换 Qwen/Kimi/OpenAI
 export LLM_BASE_URL=https://api.deepseek.com/v1
 export LLM_MODEL=deepseek-chat
 
-# 3. 跑一道题看完整轨迹
-python run_demo.py "悬臂梁长 2 m，EI=50000 N·m^2，自由端受 1000 N 集中力，挠度是多少？"
-
-# 4. 跑整套评测（每题可 --trials 3 跑多次取平均）
-python eval.py --trials 1
+python run_demo.py                     # 同一题看裸 LLM vs 智能体的差别
+python eval.py --trials 1              # 跑完整消融实验
 ```
 
-不设 key 也能先跑冒烟测试（用假 LLM 验证核心逻辑）：
+不设 key 先跑冒烟测试：
 
 ```bash
 python tests/test_smoke.py
 ```
 
-## 工具设计（能力边界）
-
-- `calculator`：只算一个表达式，白名单挡住 import / 任意函数调用。适合一步到位的计算。
-- `python`：子进程里跑任意代码，能 import math/sympy/numpy，也能超时杀掉。适合多步推导。
-
-两个工具分开，是因为它们的**信任边界**不一样：calculator 几乎安全所以快，python 强大但要隔离。agent 得自己判断该用哪个，这本身就是它"能力"的一部分。
-
 ## 评测方法
 
-- 答对标准：`|answer - expected| <= tol`（绝对误差，材料力学那题答案小所以容差更紧）
-- 失败分四类：`wrong_answer`（答了但错）、`parse_error`（输出没法解析）、`max_steps`（步数用完）、`tool_error`（工具报错且没答对）
-- 指标：成功率、答对题的平均步数、平均 token/题，另外按题型单独看
+- **评测集**：22 道科学计算题，难度分层——简单题（纯算术、单位换算）到难题（多步推理、单位陷阱、刁钻数字）。故意让"裸 LLM"在难题上出错，消融才有区分度。
+- **判对标准**：`|answer - expected| <= tol`（绝对误差）
+- **错误归因**：`wrong_answer`（答了但错）、`parse_error`（输出没法解析）、`max_steps`（步数用完）、`tool_error`（工具报错且没答对）
 
-## 结果（DeepSeek-chat 实测）
+## 结果
 
-`python eval.py --trials 1` 的真实输出：
+> 跑 `python eval.py --trials 1` 得到你自己的数字，`results/summary.json` 里有完整汇总。
 
-| 指标 | 数值 |
-|------|------|
-| 成功率 | 100%（10/10） |
-| 答对题平均步数 | 1.2 |
-| 平均 token / 题 | 409 |
+| 求解方式 | 成功率 | 平均步数 | 平均 token/题 | 错误分布 |
+|---------|--------|---------|--------------|---------|
+| baseline（裸 LLM） | ?% | — | ? | ? |
+| tools（ReAct 智能体） | ?% | ? | ? | ? |
+| reflexion（+反思重试） | ?% | ? | ? | ? |
 
-这 10 道题全对，说明这几道计算题对带工具的 Agent 来说不算难——`calculator` 一步就能兜住大部分。这其实印证了「瓶颈不在工具本身、而在模型会不会用工具」：DeepSeek-chat 的工具调用很稳，所以没出错。
+预期能看到的结论（也是这个项目想量化的东西）：
 
-想让错误分析那块真正亮出来，加几道更难的题（多步推导、单位要自己换算、或故意带陷阱）就能看到 `wrong_answer` / `parse_error` 是怎么被归因的。这也是「后面想做」里的一条。
+- 裸 LLM 在**多步推理和刁钻数字**上明显翻车，带工具后能救回来——说明瓶颈在"计算"，不在"知识"。
+- Reflexion 能把一部分 `wrong_answer` 救回来，但救不回 `parse_error`——说明反思能纠错，但纠不了"根本没学会用工具"。
+
+## 工具设计（能力边界）
+
+- `calculator`：只算一个表达式，ast 白名单挡掉 import / 任意函数调用。几乎安全、快。
+- `python`：子进程里跑任意代码，能 import math/sympy/numpy，能超时杀掉。强大但要隔离。
+
+两个工具分开，是因为**信任边界**不一样：agent 得自己判断该用哪个，这本身就是它"能力"的一部分。
 
 ## 和 LangChain / LangGraph 的对应
 
-这里手写的东西，换成框架就是：
+手写的东西换成框架就是：
 
-- `Agent.run` 的循环 ≈ `AgentExecutor` / LangGraph 里的一个 `graph.add_edge("agent", "tools")` 回环
+- `Agent.run` 的循环 ≈ `AgentExecutor` / LangGraph 里的 `graph.add_edge("agent", "tools")` 回环
 - `TOOLS` ≈ `Tool` + `StructuredTool`
-- 提示词里的工具说明 ≈ `Tool` 的 description（喂给模型做工具选择）
-- `eval.py` ≈ 一个最小版的 evaluation harness（LangSmith / Ragas 干的事）
+- 工具说明 ≈ `Tool.description`（喂给模型做工具选择）
+- `eval.py` 的消融 ≈ 一个最小版 evaluation harness（LangSmith / Ragas 干的事）
+- `reflexion` ≈ Reflexion / self-reflection 的简化实现
 
 ## 后面想做
 
-- 加一个 `web_search` 工具，让 agent 查资料而不是全靠记忆
-- 把 ReAct 升级成 Reflexion（失败后自我反思再试一次），看成功率能涨多少
+- 加 `web_search` 工具，让 agent 查资料而不是全靠记忆
 - 用 LangGraph 重写一版做对照，直接对比手写和框架
-- 支持并行跑、统计多次试验的方差
+- 支持并行跑、统计多次试验的方差，输出置信区间
+- 换成更难的推理题（如需要符号推导），进一步拉开 baseline 和 tools 的差距

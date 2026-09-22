@@ -1,4 +1,4 @@
-"""冒烟测试：不调真实 API，验证工具、解析、ReAct 循环、评测统计这些核心逻辑。
+"""冒烟测试：不调真实 API，验证工具、解析、baseline、ReAct 循环、评测统计。
 
 跑法：python -m pytest tests/ 或者直接 python tests/test_smoke.py
 """
@@ -7,12 +7,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent import Agent, parse_action, parse_final
+from agent import Agent, BaselineSolver, parse_action, parse_final, parse_number
 from tools import calculator, python_executor
 
 
 class ScriptedLLM:
-    """按顺序吐预设回复的假 LLM，用来测循环。"""
+    """按顺序吐预设回复的假 LLM。"""
     def __init__(self, replies):
         self.replies = list(replies)
         self.calls = 0
@@ -24,7 +24,7 @@ class ScriptedLLM:
 
 
 class GoldenLLM:
-    """永远直接给标准答案的假 LLM，用来测评测统计。"""
+    """永远直接给标准答案。"""
     def __init__(self, answers):
         self.answers = answers
         self.i = 0
@@ -56,6 +56,14 @@ def test_python_executor():
 def test_parse():
     assert parse_final("Final Answer: 16.666") == 16.666
     assert parse_action("Action: calculator[2*3]") == ("calculator", "2*3")
+    assert parse_number("答案是 16.67 m/s") == 16.67
+
+
+def test_baseline():
+    llm = ScriptedLLM(["答案是 16.67"])
+    r = BaselineSolver(llm).run("60 km/h 是多少 m/s")
+    assert r["final_answer"] == 16.67
+    assert r["error"] is None
 
 
 def test_react_loop():
@@ -69,8 +77,20 @@ def test_react_loop():
     assert r["error"] is None
 
 
+def test_feedback_goes_into_prompt():
+    # feedback 应该出现在首条 user 消息里（Reflexion 依赖这个）
+    seen = []
+
+    class Spy:
+        def chat(self, messages, **kwargs):
+            seen.append(messages[1]["content"])
+            return "Final Answer: 7", None
+
+    Agent(Spy()).run("1+1", feedback="上次错了")
+    assert "上次错了" in seen[0]
+
+
 def test_eval_accuracy():
-    # 用全对的金标准 LLM，评测成功率应该是 100%
     from tasks import TASKS
     llm = GoldenLLM([t["answer"] for t in TASKS])
     agent = Agent(llm)

@@ -1,11 +1,9 @@
-"""ReAct 智能体。
+"""两种求解器 + ReAct 智能体。
 
-核心是一个 Thought -> Action -> Observation 的循环：
-1. 让模型先想，再决定调用哪个工具
-2. 真正执行工具，把结果作为 Observation 喂回去
-3. 直到模型给出 Final Answer，或者超过步数上限
+- BaselineSolver：裸 LLM，不给工具，直接要答案。用来当消融实验的对照。
+- Agent：ReAct 智能体，Thought -> Action -> Observation 循环，能调用工具。
 
-不用 LangChain，手写循环是为了搞清楚每一步在干什么。
+Reflexion 的重试逻辑放在 eval.py 里，因为只有评测时才知道标准答案。
 """
 import re
 
@@ -44,8 +42,11 @@ Thought: 得到落地时间。
 Final Answer: 2.0203050891044216
 """
 
+BASELINE_SYSTEM = """你是计算助手。直接给出数值答案，只输出数字本身，不要解释、不要单位、不要步骤。"""
+
 _ACTION_RE = re.compile(r"Action:\s*(\w+)\[([^\]]*)\]")
 _FINAL_RE = re.compile(r"Final Answer:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)")
+_NUM_RE = re.compile(r"[-+]?\d+\.?\d+(?:[eE][-+]?\d+)?")
 
 
 def parse_action(text):
@@ -62,18 +63,47 @@ def parse_final(text):
     return None
 
 
+def parse_number(text):
+    """从一段文字里抠出第一个数字，给 baseline 用。"""
+    m = _NUM_RE.search(text)
+    if m:
+        return float(m.group(0))
+    return None
+
+
+class BaselineSolver:
+    """不给工具，直接让裸 LLM 报答案。"""
+
+    def __init__(self, llm):
+        self.llm = llm
+
+    def run(self, question):
+        text, usage = self.llm.chat([
+            {"role": "system", "content": BASELINE_SYSTEM},
+            {"role": "user", "content": question},
+        ])
+        ans = parse_number(text)
+        return {
+            "final_answer": ans,
+            "steps": 1,
+            "usage": usage,
+            "trajectory": [{"step": 0, "text": text}],
+            "error": None if ans is not None else "parse_error",
+        }
+
+
 class Agent:
     def __init__(self, llm):
         self.llm = llm
 
-    def run(self, question, max_steps=6):
-        """返回 dict：final_answer / steps / trajectory / error。
-
-        error 取值：None（正常给出答案）、parse_error、max_steps、tool_error。
-        """
+    def run(self, question, max_steps=6, feedback=None):
+        """feedback：Reflexion 用，把上一次的失败原因带进去。"""
+        user = FEW_SHOT + f"问：{question}"
+        if feedback:
+            user = f"上一次你没能做对这道题。{feedback}\n\n" + user
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": FEW_SHOT + f"问：{question}"},
+            {"role": "user", "content": user},
         ]
         trajectory = []
         total_usage = None
@@ -109,7 +139,7 @@ class Agent:
             else:
                 try:
                     obs = TOOLS[tool]["run"](arg)
-                except Exception as e:  # 工具执行出错也要喂回去，让模型自己修正
+                except Exception as e:
                     obs = f"工具出错: {e}"
 
             trajectory[-1]["observation"] = obs
