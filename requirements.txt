@@ -1,0 +1,2 @@
+requests>=2.28
+# sympy / numpy 可选：python 工具里如果能 import 就能用更复杂的推导
